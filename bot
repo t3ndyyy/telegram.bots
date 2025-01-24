@@ -1,0 +1,31 @@
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+
+# Функция для обработки команды /start
+def start(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text('Привет! Отправь мне номер телефона, и я попробую найти информацию о нем.')
+
+# Функция для обработки входящих сообщений с номерами телефонов
+def handle_phone_number(update: Update, context: CallbackContext) -> None:
+    phone_number = update.message.text
+    # Здесь можно добавить логику для поиска информации о номере
+    # В данном примере просто возвращаем фиктивную информацию
+    response = f"Информация о номере {phone_number}:\nВладелец: Иван Иванов\nГород: Москва"
+    update.message.reply_text(response)
+
+def main() -> None:
+    # Вставьте сюда ваш токен
+    updater = Updater("YOUR_TELEGRAM_BOT_TOKEN")
+
+    dispatcher = updater.dispatcher
+
+    # Регистрируем обработчики команд и сообщений
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_phone_number))
+
+    # Запускаем бота
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
