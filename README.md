@@ -7,6 +7,6 @@
 
 Связь с автором: @t3ndyy, @kovaggwp
 
-Поддержка аторов: @t3ndyy
+Поддержка аторов: @t3ndyy @kovaggwp
 
 
