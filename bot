@@ -1,31 +1,58 @@
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+import json
+import http.client
 
-# Функция для обработки команды /start
-def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('Привет! Отправь мне номер телефона, и я попробую найти информацию о нем.')
+# Токен вашего бота
+BOT_TOKEN = "YOUR_BOT_TOKEN"
 
-# Функция для обработки входящих сообщений с номерами телефонов
-def handle_phone_number(update: Update, context: CallbackContext) -> None:
-    phone_number = update.message.text
-    # Здесь можно добавить логику для поиска информации о номере
-    # В данном примере просто возвращаем фиктивную информацию
-    response = f"Информация о номере {phone_number}:\nВладелец: Иван Иванов\nГород: Москва"
-    update.message.reply_text(response)
+# Функция для отправки сообщений через Telegram API
+def send_message(chat_id, text):
+    conn = http.client.HTTPSConnection("api.telegram.org")
+    url = f"/bot{BOT_TOKEN}/sendMessage"
+    headers = {"Content-type": "application/json"}
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+    conn.request("POST", url, body=json.dumps(payload), headers=headers)
+    response = conn.getresponse()
+    print("Response:", response.status, response.reason)
+    conn.close()
 
-def main() -> None:
-    # Вставьте сюда ваш токен
-    updater = Updater("YOUR_TELEGRAM_BOT_TOKEN")
+# Функция для обработки входящих обновлений
+def handle_updates(updates):
+    for update in updates:
+        if "message" in update:
+            message = update["message"]
+            chat_id = message["chat"]["id"]
+            text = message.get("text", "")
 
-    dispatcher = updater.dispatcher
+            if text == "/start":
+                send_message(chat_id, "Привет! Отправь мне номер телефона, и я попробую найти информацию о нем.")
+            else:
+                # Фиктивная информация о номере телефона
+                response = f"Информация о номере {text}:\nВладелец: Иван Иванов\nГород: Москва"
+                send_message(chat_id, response)
 
-    # Регистрируем обработчики команд и сообщений
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_phone_number))
+# Функция для получения обновлений
+def get_updates(offset=None):
+    conn = http.client.HTTPSConnection("api.telegram.org")
+    url = f"/bot{BOT_TOKEN}/getUpdates"
+    if offset:
+        url += f"?offset={offset}"
+    conn.request("GET", url)
+    response = conn.getresponse()
+    data = response.read().decode("utf-8")
+    conn.close()
+    return json.loads(data)["result"]
 
-    # Запускаем бота
-    updater.start_polling()
-    updater.idle()
+# Основной цикл бота
+def main():
+    offset = None
+    while True:
+        updates = get_updates(offset)
+        if updates:
+            handle_updates(updates)
+            offset = updates[-1]["update_id"] + 1
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
