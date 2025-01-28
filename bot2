@@ -1,0 +1,38 @@
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import Message
+
+logging.basicConfig(level=logging.INFO)
+
+API_TOKEN = 'BOT TOKEN'
+
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+contacts = {
+    "Иван": "+1234567890",
+    "Мария": "+0987654321",
+    "Петр": "+1122334455",
+}
+
+@dp.message(Command("start"))
+async def send_welcome(message: Message):
+    await message.answer("Привет! Введите имя для поиска контакта.")
+
+@dp.message()
+async def get_contact(message: Message):
+    name = message.text.strip()
+    contact = contacts.get(name)
+    
+    if contact:
+        await message.answer(f"Контакт для {name}: {contact}")
+    else:
+        await message.answer(f"Контакт для {name} не найден.")
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
