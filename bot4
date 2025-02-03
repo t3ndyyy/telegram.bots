@@ -1,0 +1,140 @@
+import logging
+import re
+import sqlite3
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+
+logging.basicConfig(level=logging.INFO)
+
+API_TOKEN = '7981013026:AAF6wGfhv91p5uIfs5VRN2WnfO3p8Ymgq5Q'
+ADMIN_USER_ID = 123456789  # Укажите ID администратора
+
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+conn = sqlite3.connect('contacts.db', check_same_thread=False)
+cursor = conn.cursor()
+
+# Создание таблиц
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS groups (
+    group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_name TEXT UNIQUE
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS contacts (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    phone_number TEXT,
+    telegram TEXT,
+    vk TEXT,
+    group_id INTEGER,
+    FOREIGN KEY (group_id) REFERENCES groups (group_id)
+)
+''')
+conn.commit()
+
+def is_valid_phone_number(phone_number):
+    pattern = re.compile(r'^\+?[1-9]\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}$')
+    return pattern.match(phone_number)
+
+class Registration(StatesGroup):
+    choosing_group = State()
+    entering_name = State()
+    entering_phone = State()
+    entering_telegram = State()
+    entering_vk = State()
+
+@dp.message(Command("start"))
+async def send_welcome(message: Message):
+    keyboard = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Отправить номер телефона", request_contact=True)]
+    ], resize_keyboard=True)
+    await message.answer("Привет! Нажми на кнопку ниже, чтобы отправить мне свой номер телефона.", reply_markup=keyboard)
+
+@dp.message(lambda message: message.contact is not None)
+async def save_contact(message: Message):
+    user_id = message.from_user.id
+    username = message.from_user.username
+    phone_number = message.contact.phone_number
+    
+    if is_valid_phone_number(phone_number):
+        cursor.execute('''INSERT OR REPLACE INTO contacts (user_id, username, phone_number) VALUES (?, ?, ?)''', (user_id, username, phone_number))
+        conn.commit()
+        await message.answer(f"Спасибо! Твой номер {phone_number} сохранен.")
+    else:
+        await message.answer("Пожалуйста, отправь корректный номер телефона.")
+
+@dp.message(Command("register"))
+async def start_registration(message: Message, state: FSMContext):
+    await state.set_state(Registration.choosing_group)
+    await message.answer("Выбери свою учебную группу:")
+
+@dp.message(Registration.choosing_group)
+async def choose_group(message: Message, state: FSMContext):
+    group_name = message.text.strip()
+    cursor.execute('SELECT group_id FROM groups WHERE group_name = ?', (group_name,))
+    group = cursor.fetchone()
+    if group:
+        await state.update_data(group_id=group[0])
+        await state.set_state(Registration.entering_name)
+        await message.answer("Отлично! Теперь введи свое имя и фамилию:")
+    else:
+        await message.answer("Такой группы нет. Попробуй еще раз.")
+
+@dp.message(Registration.entering_name)
+async def enter_name(message: Message, state: FSMContext):
+    full_name = message.text.strip().split(maxsplit=1)
+    if len(full_name) == 2:
+        first_name, last_name = full_name
+        await state.update_data(first_name=first_name, last_name=last_name)
+        await state.set_state(Registration.entering_phone)
+        await message.answer("Теперь введи свой номер телефона:")
+    else:
+        await message.answer("Пожалуйста, введи имя и фамилию через пробел.")
+
+@dp.message(Registration.entering_phone)
+async def enter_phone(message: Message, state: FSMContext):
+    phone_number = message.text.strip()
+    if is_valid_phone_number(phone_number):
+        await state.update_data(phone_number=phone_number)
+        await state.set_state(Registration.entering_telegram)
+        await message.answer("Теперь введи свой Telegram:")
+    else:
+        await message.answer("Некорректный формат номера.")
+  @dp.message(Command("view_contact"))
+async def view_contact(message: Message):
+    user_id = message.from_user.id
+    cursor.execute('SELECT phone_number FROM contacts WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    if result:
+        await message.answer(f"Твой номер телефона: {result[0]}")
+    else:
+        await message.answer("Твой номер телефона не найден в базе данных.")
+
+@dp.message(Command("add_group"))
+async def add_group(message: Message):
+    if message.from_user.id == ADMIN_USER_ID:
+        group_name = message.text.split(maxsplit=1)[1].strip()
+        try:
+            cursor.execute('INSERT INTO groups (group_name) VALUES (?)', (group_name,))
+            conn.commit()
+            await message.answer(f"Группа '{group_name}' успешно добавлена.")
+        except sqlite3.IntegrityError:
+            await message.answer(f"Группа '{group_name}' уже существует.")
+    else:
+        await message.answer("У вас нет прав.")
+
+async def main():
+    await dp.start_polling(bot)
+
+if name == "main":
+    asyncio.run(main())
