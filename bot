@@ -14,8 +14,8 @@ import phonenumbers
 logging.basicConfig(level=logging.INFO)
 
 # Получение токена и ID администратора из переменных окружения
-API_TOKEN = '7981013026:AAF6wGfhv91p5uIfs5VRN2WnfO3p8Ymgq5Q'
-ADMIN_USER_ID = '1090445043'
+API_TOKEN = ''
+ADMIN_USER_ID = ''
 
 if not API_TOKEN or not ADMIN_USER_ID:
     raise ValueError("Не указаны токен бота или ID администратора в переменных окружения.")
