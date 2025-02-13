@@ -1,343 +1,674 @@
-import logging
-import re
-import sqlite3
-from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.middlewares.logging import LoggingMiddleware
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters import Command, Text
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.utils import executor
 import os
-import phonenumbers
+import logging
+import sqlite3
+import re
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from contextlib import contextmanager
+from dotenv import load_dotenv
+
+# Загрузка переменных окружения из файла .env
+load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Получение токена и ID администратора из переменных окружения
-API_TOKEN = ''
-ADMIN_USER_ID = ''
+# Инициализация бота и диспетчера
+bot = Bot(token="7981013026:AAF6wGfhv91p5uIfs5VRN2WnfO3p8Ymgq5Q")  # Замените на ваш токен
+dp = Dispatcher()
 
-if not API_TOKEN or not ADMIN_USER_ID:
-    raise ValueError("Не указаны токен бота или ID администратора в переменных окружения.")
+# Удаление старой базы данных (для отладки)
+if os.path.exists('students.db'):
+    os.remove('students.db')
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
-dp.middleware.setup(LoggingMiddleware())
+# Подключение к базе данных SQLite
+class DatabaseManager:
+    def __init__(self, db_path='students.db'):
+        self.db_path = db_path
+        self._initialize_database()
 
-# Подключение к базе данных
-conn = sqlite3.connect('university_contacts.db', check_same_thread=False)
-cursor = conn.cursor()
+    @contextmanager
+    def _get_cursor(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            yield cursor
+        finally:
+            conn.commit()
+            conn.close()
 
-# Создание таблиц, если они не существуют
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS groups (
-    group_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_name TEXT UNIQUE
-)
-''')
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS contacts (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    last_name TEXT,
-    phone_number TEXT,
-    telegram TEXT,
-    vk TEXT,
-    group_id INTEGER,
-    FOREIGN KEY (group_id) REFERENCES groups (group_id)
-)
-''')
-conn.commit()
+    def _initialize_database(self):
+        with self._get_cursor() as cursor:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    course INTEGER NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS students (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    telegram_profile TEXT,
+                    phone_number TEXT,
+                    vk_link TEXT,
+                    group_id INTEGER,
+                    FOREIGN KEY (group_id) REFERENCES groups(id)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS contacts (
+                    user_id INTEGER PRIMARY KEY,
+                    phone_number TEXT NOT NULL
+                )
+            ''')
 
-# Определение состояний для машины состояний
-class Registration(StatesGroup):
-    choosing_group = State()
-    entering_name = State()
-    entering_phone = State()
-    entering_telegram = State()
-    entering_vk = State()
+    def add_group(self, name, course):
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute('INSERT INTO groups (name, course) VALUES (?, ?)', (name, course))
+                logging.info(f"Group '{name}' added successfully.")
+                return True, f"✅ Группа '{name}' успешно добавлена на курс {course}!"
+        except sqlite3.IntegrityError:
+            logging.warning(f"Group '{name}' already exists.")
+            return False, f"🚫 Группа '{name}' уже существует."
+        except Exception as e:
+            logging.error(f"Error adding group '{name}': {e}")
+            return False, f"🚫 Ошибка при добавлении группы '{name}': {e}"
 
-# Валидация номера телефона с использованием phonenumbers
-def is_valid_phone_number(phone_number):
-    try:
-        parsed_number = phonenumbers.parse(phone_number, None)
-        return phonenumbers.is_valid_number(parsed_number)
-    except phonenumbers.phonenumberutil.NumberParseException:
-        return False
+    def group_exists(self, name, course):
+        with self._get_cursor() as cursor:
+            cursor.execute('SELECT * FROM groups WHERE name=? AND course=?', (name, course))
+            return cursor.fetchone() is not None
 
-# Главное меню
-def get_main_menu_keyboard():
-    return types.ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [types.KeyboardButton(text="📱 Отправить номер телефона", request_contact=True)],
-        [types.KeyboardButton(text="📝 Начать регистрацию")],
-        [types.KeyboardButton(text="💸 Помощь авторам")],
-        [types.KeyboardButton(text="👤 Профиль")],
-        [types.KeyboardButton(text="📚 Список групп")],
-        [types.KeyboardButton(text="❌ Удалить профиль")],
-        [types.KeyboardButton(text="🏠 Главное меню")]
-    ])
+    def get_all_groups(self):
+        with self._get_cursor() as cursor:
+            cursor.execute('SELECT * FROM groups')
+            return cursor.fetchall()
+
+    def get_groups_by_course(self, course):
+        with self._get_cursor() as cursor:
+            cursor.execute('SELECT * FROM groups WHERE course=?', (course,))
+            return cursor.fetchall()
+
+    def delete_group(self, group_id):
+        with self._get_cursor() as cursor:
+            cursor.execute('DELETE FROM groups WHERE id=?', (group_id,))
+
+    def add_student(self, name, telegram_profile=None, phone_number=None, vk_link=None, group_id=None):
+        with self._get_cursor() as cursor:
+            cursor.execute('''
+                INSERT INTO students (name, telegram_profile, phone_number, vk_link, group_id)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (name, telegram_profile, phone_number, vk_link, group_id))
+
+    def student_exists(self, name, telegram_profile):
+        with self._get_cursor() as cursor:
+            cursor.execute('SELECT * FROM students WHERE name=? OR telegram_profile=?', (name, telegram_profile))
+            return cursor.fetchone() is not None
+
+    def get_all_students(self):
+        with self._get_cursor() as cursor:
+            cursor.execute('SELECT * FROM students')
+            return cursor.fetchall()
+
+    def get_students_by_group(self, group_id):
+        with self._get_cursor() as cursor:
+            cursor.execute('SELECT * FROM students WHERE group_id=?', (group_id,))
+            return cursor.fetchall()
+
+    def delete_student(self, student_id):
+        with self._get_cursor() as cursor:
+            cursor.execute('DELETE FROM students WHERE id=?', (student_id,))
+
+    def delete_student_by_telegram(self, telegram_profile):
+        with self._get_cursor() as cursor:
+            cursor.execute('DELETE FROM students WHERE telegram_profile=?', (telegram_profile,))
+
+    def has_contact(self, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute('SELECT * FROM contacts WHERE user_id=?', (user_id,))
+            return cursor.fetchone() is not None
+
+    def save_contact(self, user_id, phone_number):
+        with self._get_cursor() as cursor:
+            cursor.execute('INSERT OR IGNORE INTO contacts (user_id, phone_number) VALUES (?, ?)', (user_id, phone_number))
+
+db = DatabaseManager()
+
+# Определение состояний
+class Form(StatesGroup):
+    waiting_for_group_name = State()
+    waiting_for_group_course = State()
+    waiting_for_group_selection = State()  # Для выбора курса
+    waiting_for_group = State()  # Для выбора группы
+    waiting_for_name = State()
+    waiting_for_telegram = State()
+    waiting_for_phone = State()
+    waiting_for_vk = State()
+
+class AdminPanel(StatesGroup):
+    managing_users = State()
+    managing_groups = State()
+
+# Клавиатура главного меню
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📝 Записаться в группу")],
+            [KeyboardButton(text="👥 Посмотреть список учащихся")],
+            [KeyboardButton(text="💸 Донат")],
+            [KeyboardButton(text="❌ Удалить мой профиль")]
+        ],
+        resize_keyboard=True
+    )
+
+# Клавиатура админ-панели
+def admin_panel_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👤 Управление пользователями")],
+            [KeyboardButton(text="📚 Управление группами")],
+            [KeyboardButton(text="➕ Добавить группу")],
+            [KeyboardButton(text="🏠 Главное меню")]
+        ],
+        resize_keyboard=True
+    )
+
+# Клавиатура для возврата в панель администратора
+def admin_back_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+        ]
+    )
+
+# Функция для проверки и форматирования номера телефона
+def validate_and_format_phone_number(phone_number: str) -> str | None:
+    """
+    Проверяет и форматирует номер телефона.
+    Возвращает номер в формате +7XXXXXXXXXX или None, если номер невалиден.
+    """
+    # Убираем все нецифровые символы
+    cleaned_number = re.sub(r"[^0-9]", "", phone_number)
+
+    # Проверяем длину номера
+    if len(cleaned_number) == 11:
+        if cleaned_number.startswith("8"):
+            # Заменяем 8 на +7
+            return "+7" + cleaned_number[1:]
+        elif cleaned_number.startswith("7"):
+            return "+" + cleaned_number
+    elif len(cleaned_number) == 10:
+        # Добавляем +7 для номеров без кода страны
+        return "+7" + cleaned_number
+
+    # Если номер не соответствует формату, возвращаем None
+    return None
 
 # Обработчик команды /start
-@dp.message_handler(commands=['start'])
-async def send_welcome(message: types.Message):
-    await message.answer(
-        "👋 Привет! Я бот для управления контактами студентов.\n\n"
-        "Выбери действие:",
-        reply_markup=get_main_menu_keyboard()
-    )
-
-# Обработка отправки контакта
-@dp.message_handler(content_types=types.ContentType.CONTACT)
-async def handle_contact(message: types.Message, state: FSMContext):
-    phone_number = message.contact.phone_number
-    if is_valid_phone_number(phone_number):
-        await state.update_data(phone_number=phone_number)
-        await state.set_state(Registration.choosing_group)
-        await message.answer(
-            "✅ Номер принят! Теперь выбери свою учебную группу:",
-            reply_markup=get_main_menu_keyboard()
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    if not db.has_contact(message.from_user.id):
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📲 Отправить контакт", request_contact=True)]
+            ],
+            resize_keyboard=True
         )
+        await message.answer("👋 Привет! Для использования бота отправьте свой контакт.", reply_markup=keyboard)
     else:
-        await message.answer(
-            "❌ Неверный формат номера. Используй /register для ручной регистрации.",
-            reply_markup=get_main_menu_keyboard()
-        )
-
-# Команда /register
-@dp.message_handler(commands=['register'])
-async def start_registration(message: types.Message, state: FSMContext):
-    await state.set_state(Registration.choosing_group)
-    await message.answer(
-        "📚 Выбери свою учебную группу:",
-        reply_markup=get_main_menu_keyboard()
-    )
-
-# Выбор группы
-@dp.message_handler(state=Registration.choosing_group)
-async def choose_group(message: types.Message, state: FSMContext):
-    group_name = message.text.strip()
-    logging.info(f"Пользователь выбрал группу: {group_name}")
-    cursor.execute('SELECT group_id FROM groups WHERE LOWER(group_name) = ?', (group_name.lower(),))
-    group = cursor.fetchone()
-    if group:
-        logging.info(f"Группа найдена: {group}")
-        await state.update_data(group_id=group[0])
-        await state.set_state(Registration.entering_name)
-        await message.answer(
-            "👤 Введи свое имя и фамилию (например, Иван Иванов):",
-            reply_markup=get_main_menu_keyboard()
-        )
-    else:
-        logging.info(f"Группа не найдена: {group_name}")
-        # Предложить список доступных групп
-        cursor.execute('SELECT group_name FROM groups')
-        groups = cursor.fetchall()
-        if groups:
-            group_list = "\n".join([f"- {g[0]}" for g in groups])
-            await message.answer(
-                f"❌ Группа не найдена. Доступные группы:\n{group_list}",
-                reply_markup=get_main_menu_keyboard()
-            )
-        else:
-            await message.answer(
-                "❌ Группы не найдены. Обратитесь к администратору.",
-                reply_markup=get_main_menu_keyboard()
-            )
-
-# Обработчик кнопки "👤 Профиль"
-@dp.message_handler(Text(equals="👤 Профиль"))
-async def profile_button(message: types.Message):
-    await view_profile(message)
-
-# Обработчик кнопки "📚 Список групп"
-@dp.message_handler(Text(equals="📚 Список групп"))
-async def groups_button(message: types.Message):
-    await show_groups(message)
-
-# Обработчик кнопки "❌ Удалить профиль"
-@dp.message_handler(Text(equals="❌ Удалить профиль"))
-async def delete_button(message: types.Message):
-    await delete_profile(message)
+        await message.answer("👋 Привет! Это бот для записи в учебную группу.", reply_markup=main_menu_keyboard())
 
 # Обработчик кнопки "🏠 Главное меню"
-@dp.message_handler(Text(equals="🏠 Главное меню"))
-async def main_menu(message: types.Message):
-    await message.answer("Главное меню:", reply_markup=get_main_menu_keyboard())
+@dp.message(F.text == "🏠 Главное меню")
+async def return_to_main_menu(message: types.Message, state: FSMContext):
+    await state.clear()  # Сбрасываем состояние
+    await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+    
+# Обработчик получения контакта
+@dp.message(F.contact)
+async def process_contact(message: types.Message):
+    if message.contact and message.contact.phone_number:
+        db.save_contact(message.from_user.id, message.contact.phone_number)
+        await message.answer("✅ Спасибо за предоставленный контакт!", reply_markup=main_menu_keyboard())
 
-# Обработчик кнопки "💸 Помощь авторам"
-@dp.message_handler(Text(equals="💸 Помощь авторам"))
-async def help_authors(message: types.Message):
-    yoomoney_link = "https://yoomoney.ru/to/4100118763269949"  # Замените на вашу ссылку на ЮMoney
-    await message.answer(
-        f"💖 Спасибо за вашу поддержку! Вы можете помочь авторам, перейдя по ссылке: {yoomoney_link}",
-        reply_markup=get_main_menu_keyboard()
+# Обработчик команды /admin (только для админа)
+ADMIN_ID = 1090445043  # Ваш ID как администратор
+
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 У вас нет прав для этой команды.", reply_markup=main_menu_keyboard())
+        return
+
+    await message.answer("👋 Добро пожаловать в панель администратора!", reply_markup=admin_panel_keyboard())
+
+# Обработчик кнопки "➕ Добавить группу"
+@dp.message(F.text == "➕ Добавить группу")
+async def add_group_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 У вас нет прав для этой команды.", reply_markup=main_menu_keyboard())
+        return
+
+    await message.answer("📝 Введите название новой группы:", reply_markup=ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
+        resize_keyboard=True
+    ))
+    await state.set_state(Form.waiting_for_group_name)
+
+# Обработчик состояния ожидания названия группы
+@dp.message(Form.waiting_for_group_name)
+async def process_group_name(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.clear()
+        await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        return
+
+    group_name = message.text.strip()
+    if not group_name:
+        await message.answer("🚫 Название группы не может быть пустым. Введите новое название:")
+        return
+
+    if len(group_name) > 50:
+        await message.answer("🚫 Название группы слишком длинное. Максимальная длина — 50 символов.")
+        return
+
+    await state.update_data({"group_name": group_name})
+    await message.answer("📚 Введите номер курса (1-4):", reply_markup=ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
+        resize_keyboard=True
+    ))
+    await state.set_state(Form.waiting_for_group_course)
+
+# Обработчик состояния ожидания номера курса
+@dp.message(Form.waiting_for_group_course)
+async def process_group_course(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.clear()
+        await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        return
+
+    try:
+        course = int(message.text)
+        if course < 1 or course > 4:
+            raise ValueError
+    except ValueError:
+        await message.answer("🚫 Номер курса должен быть числом от 1 до 4. Попробуйте снова.")
+        return
+
+    data = await state.get_data()
+    group_name = data.get("group_name")
+    if db.group_exists(group_name, course):
+        await message.answer(f"🚫 Группа '{group_name}' уже существует на курсе {course}.", reply_markup=main_menu_keyboard())
+    else:
+        success, message_text = db.add_group(group_name, course)
+        await message.answer(message_text, reply_markup=admin_panel_keyboard())
+
+    await state.clear()
+
+# Обработчик кнопки "Управление группами"
+@dp.message(F.text == "📚 Управление группами")
+async def manage_groups(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 У вас нет прав для этой команды.", reply_markup=main_menu_keyboard())
+        return
+
+    groups = db.get_all_groups()
+    if not groups:
+        await message.answer("📭 Список групп пуст.", reply_markup=admin_panel_keyboard())
+        return
+
+    # Создаем клавиатуру с кнопками для удаления групп
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for group in groups:
+        keyboard.inline_keyboard.append(
+            [InlineKeyboardButton(text=f"❌ Удалить группу: {group[1]} (Курс {group[2]})", callback_data=f"confirm_delete_group_{group[0]}")]
+        )
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+
+    await message.answer("📋 Список групп:", reply_markup=keyboard)
+
+# Обработчик кнопки "Управление пользователями"
+@dp.message(F.text == "👤 Управление пользователями")
+async def manage_users(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 У вас нет прав для этой команды.", reply_markup=main_menu_keyboard())
+        return
+
+    students = db.get_all_students()
+    if not students:
+        await message.answer("📭 Список пользователей пуст.", reply_markup=admin_panel_keyboard())
+        return
+
+    # Создаем клавиатуру с кнопками для удаления пользователей
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for student in students:
+        keyboard.inline_keyboard.append(
+            [InlineKeyboardButton(text=f"❌ Удалить пользователя: {student[1]}", callback_data=f"confirm_delete_student_{student[0]}")]
+        )
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+
+    await message.answer("📋 Список пользователей:", reply_markup=keyboard)
+
+# Обработчик callback-запросов для подтверждения удаления
+@dp.callback_query(F.data.startswith("confirm_delete_"))
+async def confirm_delete(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 У вас нет прав для этой команды.", show_alert=True)
+        return
+
+    data = callback.data
+    if data.startswith("confirm_delete_group_"):
+        group_id = int(data.split("_")[3])
+        # Создаем клавиатуру с подтверждением удаления
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"delete_group_{group_id}")],
+                [InlineKeyboardButton(text="❌ Нет, отмена", callback_data="admin_panel")]
+            ]
+        )
+        await callback.message.edit_text(f"❓ Вы уверены, что хотите удалить группу с ID {group_id}?", reply_markup=keyboard)
+
+    elif data.startswith("confirm_delete_student_"):
+        student_id = int(data.split("_")[3])
+        # Создаем клавиатуру с подтверждением удаления
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"delete_student_{student_id}")],
+                [InlineKeyboardButton(text="❌ Нет, отмена", callback_data="admin_panel")]
+            ]
+        )
+        await callback.message.edit_text(f"❓ Вы уверены, что хотите удалить пользователя с ID {student_id}?", reply_markup=keyboard)
+
+# Обработчик callback-запросов для удаления групп и пользователей
+@dp.callback_query(F.data.startswith("delete_"))
+async def delete_item(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 У вас нет прав для этой команды.", show_alert=True)
+        return
+
+    data = callback.data
+    if data.startswith("delete_group_"):
+        group_id = int(data.split("_")[2])
+        db.delete_group(group_id)
+        await callback.answer(f"✅ Группа с ID {group_id} успешно удалена.", show_alert=True)
+        await callback.message.edit_text("✅ Группа удалена.", reply_markup=admin_back_keyboard())
+
+    elif data.startswith("delete_student_"):
+        student_id = int(data.split("_")[2])
+        db.delete_student(student_id)
+        await callback.answer(f"✅ Пользователь с ID {student_id} успешно удален.", show_alert=True)
+        await callback.message.edit_text("✅ Пользователь удален.", reply_markup=admin_back_keyboard())
+
+    elif data == "admin_panel":
+        await callback.message.edit_text("👋 Добро пожаловать в панель администратора!", reply_markup=admin_panel_keyboard())
+
+# Обработчик кнопки "Записаться в группу"
+@dp.message(F.text == "📝 Записаться в группу")
+async def register(message: types.Message, state: FSMContext):
+    if not db.has_contact(message.from_user.id):
+        await message.answer("🚫 Вы не предоставили контакт. Для использования бота отправьте свой контакт.")
+        return
+
+    course_keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="1 курс")],
+            [KeyboardButton(text="2 курс")],
+            [KeyboardButton(text="3 курс")],
+            [KeyboardButton(text="4 курс")],
+            [KeyboardButton(text="🏠 Главное меню")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("📚 Выберите курс:", reply_markup=course_keyboard)
+    await state.set_state(Form.waiting_for_group_selection)  # Ожидание выбора курса
+
+# Обработчик выбора курса
+@dp.message(Form.waiting_for_group_selection)
+async def process_course_selection(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.clear()
+        await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        return
+
+    try:
+        course = int(message.text.split()[0])  # Извлекаем номер курса из текста
+    except (ValueError, IndexError):
+        await message.answer("🚫 Неверный выбор курса. Пожалуйста, выберите курс из списка.")
+        return
+
+    groups = db.get_groups_by_course(course)
+    if not groups:
+        await message.answer(f"🚫 На курсе {course} пока нет групп.", reply_markup=main_menu_keyboard())
+        return
+
+    # Сохраняем номер курса в состоянии
+    await state.update_data({"course": course})
+
+    # Создаем клавиатуру с группами
+    group_buttons = [[KeyboardButton(text=f"📚 Группа {group[1]}")] for group in groups]
+    group_buttons.append([KeyboardButton(text="🏠 Главное меню")])
+
+    group_keyboard = ReplyKeyboardMarkup(
+        keyboard=group_buttons,
+        resize_keyboard=True
     )
 
-# Команда /profile
-@dp.message_handler(commands=['profile'])
-async def view_profile(message: types.Message):
-    user_id = message.from_user.id
-    cursor.execute('''
-    SELECT first_name, last_name, phone_number, telegram, vk, group_name
-    FROM contacts
-    JOIN groups ON contacts.group_id = groups.group_id
-    WHERE user_id = ?
-    ''', (user_id,))
-    result = cursor.fetchone()
-    if result:
-        response = (
-            f"👤 Имя: {result[0]} {result[1]}\n"
-            f"📱 Телефон: {result[2]}\n"
-            f"💬 Telegram: {result[3]}\n"
-            f"🔗 VK: {result[4]}\n"
-            f"📚 Группа: {result[5]}"
-        )
-        await message.answer(response, reply_markup=get_main_menu_keyboard())
-    else:
-        await message.answer(
-            "❌ Твой профиль не найден. Пройди регистрацию через /register",
-            reply_markup=get_main_menu_keyboard()
-        )
+    await message.answer(f"📚 Выберите группу на курсе {course}:", reply_markup=group_keyboard)
+    await state.set_state(Form.waiting_for_group)  # Переходим к состоянию выбора группы
 
-# Команда /delete
-@dp.message_handler(commands=['delete'])
+
+# Обработчик выбора группы
+@dp.message(Form.waiting_for_group)
+async def process_group_selection(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.clear()
+        await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        return
+
+    # Проверяем, что сообщение содержит название группы
+    if not message.text.startswith("📚 Группа "):
+        await message.answer("🚫 Неверный выбор группы. Пожалуйста, выберите группу из списка.")
+        return
+
+    # Извлекаем название группы из текста сообщения
+    selected_group = message.text.replace("📚 Группа ", "").strip()
+
+    # Ищем группу в базе данных
+    data = await state.get_data()
+    course = data.get("course")
+    groups = db.get_groups_by_course(course)
+    group_id = None
+    for group in groups:
+        if group[1] == selected_group:  # group[1] — это название группы
+            group_id = group[0]  # group[0] — это ID группы
+            break
+
+    if group_id is None:
+        await message.answer("🚫 Неверная группа. Пожалуйста, попробуйте снова.")
+        return
+
+    # Сохраняем ID группы в состоянии
+    await state.update_data({"group_id": group_id})
+
+    # Переходим к следующему шагу — вводу имени
+    await message.answer("👤 Введите ваше имя:", reply_markup=ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
+        resize_keyboard=True
+    ))
+    await state.set_state(Form.waiting_for_name)
+
+# Обработчик состояния ожидания имени
+@dp.message(Form.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.clear()
+        await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        return
+
+    name = message.text
+    data = await state.get_data()
+    group_id = data.get("group_id")
+    await state.set_state(Form.waiting_for_telegram)
+    await message.answer(f"👤 Отлично, {name}! Теперь введите ваш Telegram-профиль (например, @username):", reply_markup=ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
+        resize_keyboard=True
+    ))
+    await state.update_data({"name": name, "group_id": group_id})
+
+# Обработчик состояния ожидания Telegram-профиля
+@dp.message(Form.waiting_for_telegram)
+async def process_telegram(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.clear()
+        await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        return
+
+    telegram_profile = message.text
+    if not telegram_profile.startswith("@"):
+        await message.answer("🚫 Telegram-профиль должен начинаться с символа @. Попробуйте снова.")
+        return
+
+    data = await state.get_data()
+    name = data.get("name", "")
+    group_id = data.get("group_id")
+    await state.set_state(Form.waiting_for_phone)
+    await message.answer(f"📱 Спасибо! Теперь введите ваш номер телефона:", reply_markup=ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
+        resize_keyboard=True
+    ))
+    await state.update_data({"name": name, "telegram_profile": telegram_profile, "group_id": group_id})
+
+# Обработчик состояния ожидания номера телефона
+@dp.message(Form.waiting_for_phone)
+async def process_phone(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.clear()
+        await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        return
+
+    phone_number = message.text
+    formatted_number = validate_and_format_phone_number(phone_number)
+    if not formatted_number:
+        await message.answer("🚫 Номер телефона должен быть в формате: +7XXXXXXXXXX или 8XXXXXXXXXX. Попробуйте снова.")
+        return
+
+    data = await state.get_data()
+    name = data.get("name", "")
+    telegram_profile = data.get("telegram_profile", "")
+    group_id = data.get("group_id")
+    await state.set_state(Form.waiting_for_vk)
+    await message.answer(f"🌐 Хорошо! Теперь введите ссылку на ваш профиль ВКонтакте:", reply_markup=ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
+        resize_keyboard=True
+    ))
+    await state.update_data({"name": name, "telegram_profile": telegram_profile, "phone_number": formatted_number, "group_id": group_id})
+
+# Обработчик состояния ожидания ссылки на ВК
+@dp.message(Form.waiting_for_vk)
+async def process_vk(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.clear()
+        await message.answer("🏠 Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        return
+
+    vk_link = message.text
+    if not re.match(r"^(https?://)?(www\.)?vk\.com/[\w\.-]+$", vk_link):
+        await message.answer("🚫 Ссылка на ВКонтакте должна быть в формате: https://vk.com/username. Попробуйте снова.")
+        return
+
+    data = await state.get_data()
+    name = data.get("name", "")
+    telegram_profile = data.get("telegram_profile", "")
+    phone_number = data.get("phone_number", "")
+    group_id = data.get("group_id")
+
+    if db.student_exists(name, telegram_profile):
+        await message.answer(f"🚫 Студент с именем '{name}' или Telegram-профилем '{telegram_profile}' уже существует.", reply_markup=main_menu_keyboard())
+    else:
+        db.add_student(name, telegram_profile, phone_number, vk_link, group_id)
+        await message.answer("✅ Вы успешно записаны в группу!", reply_markup=main_menu_keyboard())
+
+    await state.clear()
+
+# Обработчик кнопки "Посмотреть список учащихся"
+@dp.message(F.text == "👥 Посмотреть список учащихся")
+async def view_students(message: types.Message):
+    if not db.has_contact(message.from_user.id):
+        await message.answer("🚫 Вы не предоставили контакт. Для использования бота отправьте свой контакт.")
+        return
+
+    course_keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="1 курс")],
+            [KeyboardButton(text="2 курс")],
+            [KeyboardButton(text="3 курс")],
+            [KeyboardButton(text="4 курс")],
+            [KeyboardButton(text="🏠 Главное меню")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("📚 Выберите курс для просмотра списка учащихся:", reply_markup=course_keyboard)
+
+# Обработчик выбора курса для просмотра списка учащихся
+@dp.message(F.text.endswith("курс"))
+async def view_students_by_course(message: types.Message):
+    try:
+        course = int(message.text.split()[0])
+    except (ValueError, IndexError):
+        await message.answer("🚫 Неверный выбор курса. Пожалуйста, выберите курс из списка.")
+        return
+
+    groups = db.get_groups_by_course(course)
+    if not groups:
+        await message.answer(f"📭 На курсе {course} пока нет групп.", reply_markup=main_menu_keyboard())
+        return
+
+    response = f"📋 Список учащихся на курсе {course}:\n\n"
+    for group in groups:
+        students = db.get_students_by_group(group[0])
+        if students:
+            response += f"📚 Группа {group[1]}:\n"
+            for student in students:
+                response += (
+                    f"👤 Имя: {student[1]}\n"
+                    f"📱 Telegram: {student[2]}\n"
+                    f"📞 Телефон: {student[3]}\n"
+                    f"🌐 ВКонтакте: {student[4]}\n\n"
+                )
+        else:
+            response += f"📚 Группа {group[1]}: Пока нет учащихся.\n\n"
+
+    await message.answer(response, reply_markup=main_menu_keyboard())
+
+# Обработчик кнопки "Удалить мой профиль"
+@dp.message(F.text == "❌ Удалить мой профиль")
 async def delete_profile(message: types.Message):
-    user_id = message.from_user.id
-    cursor.execute('DELETE FROM contacts WHERE user_id = ?', (user_id,))
-    conn.commit()
-    await message.answer(
-        "❌ Твой профиль был удален",
-        reply_markup=get_main_menu_keyboard()
+    if not db.has_contact(message.from_user.id):
+        await message.answer("🚫 Вы не предоставили контакт. Для использования бота отправьте свой контакт.")
+        return
+
+    db.delete_student_by_telegram(message.from_user.username)
+    await message.answer("✅ Ваш профиль успешно удален.", reply_markup=main_menu_keyboard())
+
+# Обработчик кнопки "Донат"
+@dp.message(F.text == "💸 Донат")
+async def donate(message: types.Message):
+    if not db.has_contact(message.from_user.id):
+        await message.answer("🚫 Вы не предоставили контакт. Для использования бота отправьте свой контакт.")
+        return
+
+    donate_button = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💸 Поддержать проект", url="https://yoomoney.ru/to/4100118763269949")]
+        ]
     )
+    await message.answer("💖 Спасибо за поддержку проекта!", reply_markup=donate_button)
 
-# Админ-команда /add_group
-@dp.message_handler(commands=['add_group'])
-async def add_group(message: types.Message):
-    if str(message.from_user.id) == str(ADMIN_USER_ID):
-        try:
-            group_name = message.text.split(maxsplit=1)[1].strip()
-            if not group_name:
-                raise ValueError("Название группы не указано")
-            cursor.execute('INSERT INTO groups (group_name) VALUES (?)', (group_name,))
-            conn.commit()
-            await message.answer(
-                f"✅ Группа '{group_name}' добавлена",
-                reply_markup=get_main_menu_keyboard()
-            )
-        except IndexError:
-            await message.answer(
-                "❌ Укажи название группы",
-                reply_markup=get_main_menu_keyboard()
-            )
-        except sqlite3.IntegrityError:
-            await message.answer(
-                "❌ Группа с таким названием уже существует",
-                reply_markup=get_main_menu_keyboard()
-            )
-        except Exception as e:
-            logging.error(f"Ошибка при добавлении группы: {e}")
-            await message.answer(
-                "❌ Произошла ошибка при добавлении группы",
-                reply_markup=get_main_menu_keyboard()
-            )
-    else:
-        await message.answer(
-            "⛔ У вас нет прав на эту команду",
-            reply_markup=get_main_menu_keyboard()
-        )
-
-# Админ-команда /groups
-@dp.message_handler(commands=['groups'])
-async def show_groups(message: types.Message):
-    cursor.execute('SELECT group_name FROM groups')
-    groups = cursor.fetchall()
-    if groups:
-        response = "📚 Список групп:\n" + "\n".join([f"- {g[0]}" for g in groups])
-        await message.answer(
-            response,
-            reply_markup=get_main_menu_keyboard()
-        )
-    else:
-        await message.answer(
-            "❌ Группы не найдены",
-            reply_markup=get_main_menu_keyboard()
-        )
-
-# Админ-команда /group_info
-@dp.message_handler(commands=['group_info'])
-async def group_info(message: types.Message):
-    if str(message.from_user.id) == str(ADMIN_USER_ID):
-        try:
-            group_name = message.text.split(maxsplit=1)[1].strip()
-            cursor.execute('''
-            SELECT first_name, last_name, phone_number 
-            FROM contacts 
-            JOIN groups ON contacts.group_id = groups.group_id 
-            WHERE group_name = ?
-            ''', (group_name,))
-            members = cursor.fetchall()
-            if members:
-                response = f"👥 Участники группы {group_name}:\n"
-                response += "\n".join([f"- {m[0]} {m[1]}: {m[2]}" for m in members])
-                await message.answer(
-                    response,
-                    reply_markup=get_main_menu_keyboard()
-                )
-            else:
-                await message.answer(
-                    f"❌ В группе '{group_name}' нет участников",
-                    reply_markup=get_main_menu_keyboard()
-                )
-        except IndexError:
-            await message.answer(
-                "❌ Укажи название группы",
-                reply_markup=get_main_menu_keyboard()
-            )
-        except Exception as e:
-            logging.error(f"Ошибка при получении информации о группе: {e}")
-            await message.answer(
-                "❌ Произошла ошибка при получении информации о группе",
-                reply_markup=get_main_menu_keyboard()
-            )
-    else:
-        await message.answer(
-            "⛔ У вас нет прав на эту команду",
-            reply_markup=get_main_menu_keyboard()
-        )
-
-# Обработчик команды /help
-@dp.message_handler(commands=['help'])
-async def help_command(message: types.Message):
-    help_text = (
-        "📚 Доступные команды:\n\n"
-        "/start - Начать работу с ботом\n"
-        "/register - Регистрация\n"
-        "/profile - Просмотр профиля\n"
-        "/delete - Удаление профиля\n"
-        "💸 Помощь авторам - Поддержать авторов\n\n"
-        "Для администраторов:\n"
-        "/add_group - Добавить группу\n"
-        "/groups - Список групп\n"
-        "/group_info - Информация о группе"
-    )
-    await message.answer(help_text, reply_markup=get_main_menu_keyboard())
-
-# Обработчик ошибок
-@dp.errors_handler()
-async def errors_handler(update: types.Update, exception: Exception):
-    logging.error(f"Update {update} вызвал ошибку: {exception}", exc_info=True)
-    await update.message.reply(
-        "Произошла ошибка. Пожалуйста, попробуйте снова позже.",
-        reply_markup=get_main_menu_keyboard()
-    )
-    return True
-
-# Функция запуска бота
-if __name__ == "__main__":
-    from aiogram.utils.executor import start_polling
-
-    async def on_shutdown(dp):
-        conn.close()  # Закрытие соединения с базой данных
-
-    start_polling(dp, skip_updates=True, on_shutdown=on_shutdown)
+if __name__ == '__main__':
+    dp.run_polling(bot)
