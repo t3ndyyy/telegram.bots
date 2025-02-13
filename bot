@@ -17,7 +17,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 # Инициализация бота и диспетчера
-bot = Bot(token="7981013026:AAF6wGfhv91p5uIfs5VRN2WnfO3p8Ymgq5Q")  # Замените на ваш токен
+bot = Bot(token="BOT_TOKEN")  # Замените на ваш токен
 dp = Dispatcher()
 
 # Удаление старой базы данных (для отладки)
@@ -238,7 +238,7 @@ async def process_contact(message: types.Message):
         await message.answer("✅ Спасибо за предоставленный контакт!", reply_markup=main_menu_keyboard())
 
 # Обработчик команды /admin (только для админа)
-ADMIN_ID = 1090445043  # Ваш ID как администратор
+ADMIN_ID = ID  # Ваш ID как администратор
 
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
