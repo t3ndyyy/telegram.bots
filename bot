@@ -497,7 +497,7 @@ async def process_group_selection(message: types.Message, state: FSMContext):
     await state.update_data({"group_id": group_id})
 
     # Переходим к следующему шагу — вводу имени
-    await message.answer("👤 Введите ваше имя:", reply_markup=ReplyKeyboardMarkup(
+    await message.answer("👤 Введите фамилию и имя:", reply_markup=ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
         resize_keyboard=True
     ))
