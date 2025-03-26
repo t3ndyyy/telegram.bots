@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token="7799348568:AAEFkoTyYPDxhR1rSzlposQMkr5PbjJEL7U")
+bot = Bot(token="ваш токен бота")
 dp = Dispatcher()
 
 class DatabaseManager:
@@ -261,7 +261,7 @@ async def process_contact(message: types.Message):
         keyboard = main_menu_keyboard(registered=bool(group_info))
         await message.answer("✅ Спасибо за предоставленный контакт!", reply_markup=keyboard)
 
-ADMIN_ID = 6072376664
+ADMIN_ID = ваш тг айди
 
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
